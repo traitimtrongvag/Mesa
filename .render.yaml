@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: rust-message-server
+    name: rust-message-ws-gateway
     env: rust
     plan: free
-    repo: https://github.com/traitimtrongvag/MessageAnonymous.git
+    repo: https://github.com/traitimtrongvag/MessageAnonymous.git  # hoặc repo gateway
     branch: main
     buildCommand: cargo build --release
-    startCommand: ./target/release/message server --listen 0.0.0.0:$PORT
+    startCommand: ./target/release/your_gateway_binary
     envVars:
       - key: PORT
         fromRender: PORT
