@@ -4,7 +4,7 @@ use futures::{SinkExt, StreamExt};
 use tungstenite::Message;
 
 pub async fn run_client() {
-    // default local url; nếu muốn connect tới deploy đổi thành wss://your-domain/
+    // lấy URL từ env hoặc default localhost
     let url = std::env::var("WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:8080/ws".to_string());
     println!("Connecting to {}", url);
 
@@ -19,13 +19,14 @@ pub async fn run_client() {
 
     let (mut write, mut read) = ws_stream.split();
 
-    // task: read incoming and print
+    // task: đọc message từ server
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(m) => {
                     if let Ok(txt) = m.to_text() {
-                        println!("\n[remote] {}", txt);
+                        // in thẳng token và nội dung, không kèm [remote]
+                        println!("\n{}", txt);
                         print!("> ");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
@@ -38,7 +39,7 @@ pub async fn run_client() {
         }
     });
 
-    // stdin loop to send
+    // stdin loop: gửi message
     let stdin = io::BufReader::new(io::stdin());
     let mut lines = stdin.lines();
 

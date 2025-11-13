@@ -1,17 +1,12 @@
 mod server;
-mod client;
-
-use std::env;
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
+    // Lấy port từ biến môi trường (Render)
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or("8080".to_string())
+        .parse()
+        .unwrap_or(8080);
 
-    // `cargo run -- client` sẽ chạy client (kết nối tới ws://localhost)
-    if args.len() > 1 && args[1] == "client" {
-        client::run_client().await;
-    } else {
-        // default: run server (sử dụng PORT từ env hoặc 8080)
-        server::run_server().await;
-    }
+    server::run_server(port).await;
 }

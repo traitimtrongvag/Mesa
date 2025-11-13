@@ -1,85 +1,82 @@
 use warp::Filter;
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc::UnboundedSender};
+use std::sync::{Arc, Mutex};
 use futures::{SinkExt, StreamExt};
 use warp::ws::{Message, WebSocket};
+use std::collections::HashMap;
+use tokio::sync::mpsc::UnboundedSender;
+use rand::{thread_rng, Rng};
+use rand::distributions::Alphanumeric;
 
-type Clients = Arc<Mutex<Vec<UnboundedSender<Message>>>>;
+type Clients = Arc<Mutex<HashMap<String, UnboundedSender<Message>>>>;
 
-pub async fn run_server() {
-    let clients: Clients = Arc::new(Mutex::new(Vec::new()));
+pub async fn run_server(port: u16) {
+    let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
     let clients_filter = warp::any().map(move || clients.clone());
 
-    // ws at "/" and "/ws" (so websocat without path works)
-    let ws_root = warp::path::end()
+    let ws_route = warp::path("ws")
         .and(warp::ws())
-        .and(clients_filter.clone())
+        .and(clients_filter)
         .map(|ws: warp::ws::Ws, clients| {
-            ws.on_upgrade(move |socket| handle_ws(socket, clients))
+            ws.on_upgrade(move |socket| client_connected(socket, clients))
         });
 
-    let ws_ws = warp::path("ws")
-        .and(warp::ws())
-        .and(clients_filter.clone())
-        .map(|ws: warp::ws::Ws, clients| {
-            ws.on_upgrade(move |socket| handle_ws(socket, clients))
-        });
-
-    let routes = ws_root.or(ws_ws).with(warp::log("message_ws"));
-
-    // read PORT env var (Render sets $PORT)
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8080);
-
-    println!("WebSocket server listening on 0.0.0.0:{} (paths: / and /ws)", port);
-    warp::serve(routes).run(([0, 0, 0, 0], port)).await;
+    println!("WebSocket server on port {} (path /ws)", port);
+    warp::serve(ws_route).run(([0,0,0,0], port)).await;
 }
 
-async fn handle_ws(ws: WebSocket, clients: Clients) {
-    let (mut ws_tx, mut ws_rx) = ws.split();
+fn generate_token(len: usize) -> String {
+    thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(len)
+        .map(char::from)
+        .collect()
+}
 
+async fn client_connected(ws: WebSocket, clients: Clients) {
+    let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
-    // add to clients list
-    clients.lock().await.push(tx);
+    let token = generate_token(6);
+    println!("New client connected with token [{}]", token);
 
-    // spawn a task that forwards messages from rx -> websocket sink
-    let write_task = tokio::spawn(async move {
+    clients.lock().unwrap().insert(token.clone(), tx);
+
+    // task gửi message từ server -> client
+    let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if ws_tx.send(msg).await.is_err() {
                 break;
             }
         }
-        // rx tự drop ở đây khi while kết thúc
     });
 
-    // read loop: incoming messages from this ws connection
+    // nhận message từ client
     while let Some(result) = ws_rx.next().await {
         match result {
             Ok(msg) => {
-                if msg.is_text() {
-                    let txt = msg.to_str().unwrap_or("").to_string();
-                    let mut guard = clients.lock().await;
-                    // gửi tới tất cả client, retain chỉ các client còn sống
-                    guard.retain(|client_tx| client_tx.send(Message::text(txt.clone())).is_ok());
+                if msg.is_text() || msg.is_binary() {
+                    let text = msg.to_str().unwrap_or("").to_string();
+                    let broadcast_msg = format!("[{}]: {}", token, text);
+
+                    // broadcast tới tất cả client khác
+                    let clients_map = clients.lock().unwrap().clone();
+                    for (tok, client_tx) in clients_map.iter() {
+                        if *tok == token { continue; } // skip origin
+                        let _ = client_tx.send(Message::text(broadcast_msg.clone()));
+                    }
                 } else if msg.is_close() {
                     break;
                 }
             }
             Err(e) => {
-                eprintln!("ws receive error: {:?}", e);
+                eprintln!("ws recv error: {:?}", e);
                 break;
             }
         }
     }
 
-    // connection closing: xóa client khỏi danh sách
-    // retain chỉ các client còn gửi được
-    let mut guard = clients.lock().await;
-    guard.retain(|client_tx| client_tx.send(Message::text("")).is_ok());
+    clients.lock().unwrap().remove(&token);
+    println!("Client [{}] disconnected", token);
 
-    // **không cần drop(rx) nữa**, write_task sẽ tự dừng khi rx hết
-    let _ = write_task.await;
+    let _ = send_task.await;
 }
