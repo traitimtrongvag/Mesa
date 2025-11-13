@@ -631,6 +631,7 @@ dependencies = [
  "rand",
  "rsa",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-tungstenite 0.20.1",
  "tungstenite 0.20.1",
