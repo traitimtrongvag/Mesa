@@ -241,9 +241,19 @@ async fn handle_conn(mut stream: TcpStream, is_server: bool) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Kiểm tra biến môi trường RENDER hoặc PORT
+    let is_render = std::env::var("PORT").is_ok();
 
-    match cli.cmd {
+    // Nếu chạy trên Render, tự tạo server subcommand
+    let cli_cmd = if is_render {
+        Commands::Server { 
+            listen: format!("0.0.0.0:{}", std::env::var("PORT").unwrap()) 
+        }
+    } else {
+        Cli::parse().cmd
+    };
+
+    match cli_cmd {
         Commands::GenKey => {
             let mut sk = [0u8; 32];
             OsRng.fill_bytes(&mut sk);
