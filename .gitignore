@@ -1,3 +1,14 @@
+# target folder (build output)
 /target
+
+# Rust backup files
 **/*.rs.bk
-Cargo.lock   # optional nếu muốn build trên server luôn
+
+# Cargo.lock có thể bỏ nếu muốn build luôn trên server
+Cargo.lock
+
+# Optional: editor configs
+*.swp
+*.swo
+.idea/
+.vscode/

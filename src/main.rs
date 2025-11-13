@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bytes::{BufMut, BytesMut};
+use bytes::BufMut; // xóa BytesMut vì không dùng
 use clap::{Parser, Subcommand};
 use dirs::config_dir;
 use rand::rngs::OsRng;
@@ -28,11 +28,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run as server (responder)
     Server { listen: String },
-    /// Connect to server (initiator)
     Connect { addr: String },
-    /// Generate identity keypair (x25519) and save locally
     GenKey,
 }
 
@@ -53,7 +50,7 @@ fn get_keypath() -> PathBuf {
 }
 
 fn save_privkey(privkey: &[u8]) -> Result<()> {
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
     let kp = Keypair {
         privkey_b64: general_purpose::STANDARD.encode(privkey),
     };
@@ -64,12 +61,20 @@ fn save_privkey(privkey: &[u8]) -> Result<()> {
 }
 
 fn load_privkey() -> Result<Vec<u8>> {
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
     let p = get_keypath();
+    if !p.exists() {
+        // nếu key chưa tồn tại -> tạo mới
+        let mut sk = [0u8; 32];
+        OsRng.fill_bytes(&mut sk);
+        save_privkey(&sk)?;
+        println!("Generated new key at {:?}", p);
+    }
     let s = fs::read_to_string(p)?;
     let kp: Keypair = serde_json::from_str(&s)?;
     Ok(general_purpose::STANDARD.decode(kp.privkey_b64)?)
 }
+
 
 /// Write a length-prefixed message
 async fn write_lp(stream: &mut TcpStream, buf: &[u8]) -> Result<()> {
@@ -246,6 +251,8 @@ async fn main() -> Result<()> {
             println!("Saved key to {:?}", get_keypath());
         }
         Commands::Server { listen } => {
+            // server tự sinh key nếu chưa có
+            let _ = load_privkey()?;
             let listener = TcpListener::bind(&listen).await?;
             println!("Listening on {}", listen);
             loop {
