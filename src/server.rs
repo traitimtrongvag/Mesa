@@ -40,7 +40,6 @@ pub async fn run_server() {
 async fn handle_ws(ws: WebSocket, clients: Clients) {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    // channel to send messages to this client task
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
     // add to clients list
@@ -53,6 +52,7 @@ async fn handle_ws(ws: WebSocket, clients: Clients) {
                 break;
             }
         }
+        // rx tự drop ở đây khi while kết thúc
     });
 
     // read loop: incoming messages from this ws connection
@@ -61,12 +61,9 @@ async fn handle_ws(ws: WebSocket, clients: Clients) {
             Ok(msg) => {
                 if msg.is_text() {
                     let txt = msg.to_str().unwrap_or("").to_string();
-                    // broadcast to all clients
                     let mut guard = clients.lock().await;
-                    // retain only open clients; send text
-                    guard.retain(|client_tx| {
-                        client_tx.send(Message::text(txt.clone())).is_ok()
-                    });
+                    // gửi tới tất cả client, retain chỉ các client còn sống
+                    guard.retain(|client_tx| client_tx.send(Message::text(txt.clone())).is_ok());
                 } else if msg.is_close() {
                     break;
                 }
@@ -78,14 +75,11 @@ async fn handle_ws(ws: WebSocket, clients: Clients) {
         }
     }
 
-    // connection closing: remove dead senders (we did retention above, but ensure cleanup)
-    {
-        let mut guard = clients.lock().await;
-        // best-effort: remove any closed channels (retain those that can still send)
-        guard.retain(|client_tx| client_tx.send(Message::text("")).is_ok());
-    }
+    // connection closing: xóa client khỏi danh sách
+    // retain chỉ các client còn gửi được
+    let mut guard = clients.lock().await;
+    guard.retain(|client_tx| client_tx.send(Message::text("")).is_ok());
 
-    // drop rx to stop write_task
-    drop(rx);
+    // **không cần drop(rx) nữa**, write_task sẽ tự dừng khi rx hết
     let _ = write_task.await;
 }
