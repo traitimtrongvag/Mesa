@@ -1,0 +1,3 @@
+/target
+**/*.rs.bk
+Cargo.lock   # optional nếu muốn build trên server luôn
