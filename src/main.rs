@@ -10,7 +10,7 @@ use snow::Builder;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -62,8 +62,8 @@ fn load_privkey() -> Result<Vec<u8>> {
     Ok(general_purpose::STANDARD.decode(kp.privkey_b64)?)
 }
 
-/// Write length-prefixed buffer to TcpStream (u16 BE)
-async fn write_lp_tcp(stream: &mut TcpStream, buf: &[u8]) -> Result<()> {
+/// Write length-prefixed buffer to any async writer
+async fn write_lp<S: AsyncWrite + Unpin>(stream: &mut S, buf: &[u8]) -> Result<()> {
     let len = buf.len() as u16;
     let mut tmp = Vec::with_capacity(2 + buf.len());
     tmp.put_u16(len);
@@ -72,8 +72,8 @@ async fn write_lp_tcp(stream: &mut TcpStream, buf: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Read length-prefixed buffer from TcpStream
-async fn read_lp_tcp(stream: &mut TcpStream) -> Result<Vec<u8>> {
+/// Read length-prefixed buffer from any async reader
+async fn read_lp<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Vec<u8>> {
     let mut lenbuf = [0u8; 2];
     stream.read_exact(&mut lenbuf).await?;
     let len = u16::from_be_bytes(lenbuf) as usize;
@@ -82,32 +82,34 @@ async fn read_lp_tcp(stream: &mut TcpStream) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Noise XX initiator handshake
+/// Noise XX handshake as initiator
 async fn noise_handshake_initiator_tcp(
-    stream: &mut TcpStream,
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     privkey: &[u8],
 ) -> Result<snow::TransportState> {
     let builder = Builder::new(PATTERN.parse()?);
-    let mut noise = builder.local_private_key(privkey).build_initiator()?;
+    let mut noise = builder
+        .local_private_key(privkey)
+        .build_initiator()?;
 
     let mut buf = vec![0u8; 65535];
 
     // -> msg_0
     let len = noise.write_message(&[], &mut buf)?;
-    write_lp_tcp(stream, &buf[..len]).await?;
+    write_lp(stream, &buf[..len]).await?;
 
     // <- msg_1
-    let resp = read_lp_tcp(stream).await?;
+    let resp = read_lp(stream).await?;
     let _ = noise.read_message(&resp, &mut buf)?;
 
     // -> msg_2
     let len2 = noise.write_message(&[], &mut buf)?;
-    write_lp_tcp(stream, &buf[..len2]).await?;
+    write_lp(stream, &buf[..len2]).await?;
 
     Ok(noise.into_transport_mode()?)
 }
 
-/// Bridge a single websocket connection to Noise/TCP backend
+/// Bridge WebSocket <-> TCP backend
 async fn handle_ws_client(
     ws: tokio_tungstenite::WebSocketStream<TcpStream>,
     backend_addr: &str,
@@ -121,7 +123,7 @@ async fn handle_ws_client(
 
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
 
-    // WS -> TCP
+    // WS -> Backend
     let transport_tx = Arc::clone(&transport);
     let ws_to_backend = tokio::spawn(async move {
         while let Some(msg) = ws_stream.next().await {
@@ -134,7 +136,7 @@ async fn handle_ws_client(
                         t.write_message(plaintext, &mut cipher_buf)
                             .map_err(|e| anyhow::anyhow!("noise write error: {:?}", e))?
                     };
-                    write_lp_tcp(&mut tcp_write, &cipher_buf[..len]).await?;
+                    write_lp(&mut tcp_write, &cipher_buf[..len]).await?;
                 }
                 Ok(Message::Binary(bin)) => {
                     let plaintext = bin.as_slice();
@@ -144,7 +146,7 @@ async fn handle_ws_client(
                         t.write_message(plaintext, &mut cipher_buf)
                             .map_err(|e| anyhow::anyhow!("noise write error: {:?}", e))?
                     };
-                    write_lp_tcp(&mut tcp_write, &cipher_buf[..len]).await?;
+                    write_lp(&mut tcp_write, &cipher_buf[..len]).await?;
                 }
                 Ok(Message::Close(_)) | Err(_) => break,
                 _ => {}
@@ -154,11 +156,11 @@ async fn handle_ws_client(
         Ok::<(), anyhow::Error>(())
     });
 
-    // TCP -> WS
+    // Backend -> WS
     let transport_rx = Arc::clone(&transport);
     let backend_to_ws = tokio::spawn(async move {
         loop {
-            let ct = match read_lp_tcp(&mut tcp_read).await {
+            let ct = match read_lp(&mut tcp_read).await {
                 Ok(b) => b,
                 Err(_) => break,
             };
@@ -185,8 +187,10 @@ async fn handle_ws_client(
 
 #[derive(Parser)]
 struct Args {
+    /// backend address (host:port)
     #[arg(long, default_value = "127.0.0.1:10000")]
     backend: String,
+    /// listen port for gateway (use $PORT in Render)
     #[arg(long, default_value = "8080")]
     port: String,
 }
@@ -211,12 +215,12 @@ async fn main() -> Result<()> {
             let ws = match tokio_tungstenite::accept_async(stream).await {
                 Ok(ws) => ws,
                 Err(e) => {
-                    eprintln!("WebSocket accept error: {:?}", e);
+                    eprintln!("ws accept error: {:?}", e);
                     return;
                 }
             };
             if let Err(e) = handle_ws_client(ws, &backend, pk).await {
-                eprintln!("Bridge error for {}: {:?}", peer, e);
+                eprintln!("bridge error for {}: {:?}", peer, e);
             }
         });
     }
