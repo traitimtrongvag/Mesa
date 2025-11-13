@@ -49,7 +49,15 @@ pub async fn run_server(port: u16) {
         .and(warp::ws())
         .and(clients_filter)
         .map(|ws: warp::ws::Ws, clients| {
-            ws.on_upgrade(move |socket| client_connected(socket, clients))
+            ws.on_upgrade({
+    let clients = clients.clone();
+    move |socket| {
+        let clients = clients.clone();
+        async move {
+            client_connected(socket, clients).await;
+        }
+    }
+})
         });
 
     println!("E2EE WebSocket server on port {} (path /ws)", port);
