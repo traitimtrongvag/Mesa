@@ -36,8 +36,12 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
-    let token = generate_token(6);
-    println!("New client connected with token [{}]", token);
+    let token_len = thread_rng().gen_range(10..=12);
+let token = generate_token(token_len);
+println!("New client connected with token [{}]", token);
+
+// Gửi token cho client ngay khi kết nối
+let _ = tx.send(Message::text(format!("[Token]:{}", token)));
 
     clients.lock().unwrap().insert(token.clone(), tx);
 

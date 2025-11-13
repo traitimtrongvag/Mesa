@@ -4,7 +4,6 @@ use futures::{SinkExt, StreamExt};
 use tungstenite::Message;
 
 pub async fn run_client() {
-    // lấy URL từ env hoặc default localhost
     let url = std::env::var("WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:8080/ws".to_string());
     println!("Connecting to {}", url);
 
@@ -18,17 +17,26 @@ pub async fn run_client() {
     println!("Connected to {}", url);
 
     let (mut write, mut read) = ws_stream.split();
+    let token = tokio::sync::Mutex::new(String::new());
 
-    // task: đọc message từ server
+    // Task nhận message từ server
+    let token_clone = token.clone();
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(m) => {
                     if let Ok(txt) = m.to_text() {
-                        // in thẳng token và nội dung, không kèm [remote]
-                        println!("\n{}", txt);
-                        print!("> ");
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        if txt.starts_with("[Token]:") {
+                            // Lưu token của chính client
+                            let mut t = token_clone.lock().await;
+                            *t = txt[8..].to_string();
+                        } else {
+                            // In message từ server
+                            println!("\n{}", txt);
+                            let t = token_clone.lock().await;
+                            print!("[{} (you)]: ", t);
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                        }
                     }
                 }
                 Err(e) => {
@@ -39,11 +47,12 @@ pub async fn run_client() {
         }
     });
 
-    // stdin loop: gửi message
+    // Task gửi message từ stdin
     let stdin = io::BufReader::new(io::stdin());
     let mut lines = stdin.lines();
 
-    print!("> ");
+    // In prompt lúc đầu (chưa có token thì tạm để trống)
+    print!("[... (you)]: ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     while let Ok(Some(line)) = lines.next_line().await {
@@ -51,7 +60,8 @@ pub async fn run_client() {
             println!("connection closed");
             break;
         }
-        print!("> ");
+        let t = token.lock().await;
+        print!("[{} (you)]: ", t);
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 }
