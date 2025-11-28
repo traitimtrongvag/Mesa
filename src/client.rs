@@ -5,13 +5,14 @@ use tungstenite::Message;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
-use rsa::{RsaPrivateKey, RsaPublicKey};
-use rsa::pkcs8::{EncodePublicKey, DecodePublicKey, LineEnding};
-use rsa::pkcs1v15::{Encryptor, Decryptor};
+use rsa::{RsaPrivateKey, RsaPublicKey, PaddingScheme};
+use rsa::pkcs8::{EncodePublicKey, LineEnding};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use aes_gcm::aead::{Aead, KeyInit};
+use rand::rngs::OsRng;
 use rand::RngCore;
 use base64::{Engine as _, engine::general_purpose};
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
@@ -32,14 +33,13 @@ struct Session {
     token: String,
     private_key: RsaPrivateKey,
     public_key: RsaPublicKey,
-    peer_keys: Arc<Mutex<std::collections::HashMap<String, RsaPublicKey>>>,
-    aes_keys: Arc<Mutex<std::collections::HashMap<String, (Vec<u8>, Vec<u8>, u64)>>>,
+    peer_keys: Arc<Mutex<HashMap<String, RsaPublicKey>>>,
+    aes_keys: Arc<Mutex<HashMap<String, (Vec<u8>, Vec<u8>, u64)>>>,
 }
 
 #[tokio::main]
 async fn main() {
-    let url = std::env::var("WS_URL")
-        .unwrap_or_else(|_| "ws://127.0.0.1:8081/ws".to_string());
+    let url = std::env::var("WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:8081/ws".to_string());
 
     println!("Connecting to {}", url);
 
@@ -53,7 +53,7 @@ async fn main() {
 
     println!("Connected");
 
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     let bits = 2048;
     let private_key = RsaPrivateKey::new(&mut rng, bits).expect("Failed to generate key");
     let public_key = RsaPublicKey::from(&private_key);
@@ -62,16 +62,16 @@ async fn main() {
         token: String::new(),
         private_key,
         public_key: public_key.clone(),
-        peer_keys: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        aes_keys: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        peer_keys: Arc::new(Mutex::new(HashMap::new())),
+        aes_keys: Arc::new(Mutex::new(HashMap::new())),
     }));
 
     let (write, mut read) = ws_stream.split();
-
-    let session_clone = session.clone();
     let write_clone = Arc::new(Mutex::new(write));
-    let write_for_handler = write_clone.clone();
+    let session_clone = session.clone();
 
+    // Reader task
+    let write_for_handler = write_clone.clone();
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {
             match msg {
@@ -88,22 +88,21 @@ async fn main() {
         }
     });
 
+    // Stdin loop
     let stdin = io::BufReader::new(io::stdin());
     let mut lines = stdin.lines();
 
-    loop {
-        if let Ok(Some(line)) = lines.next_line().await {
-            if line.starts_with("/to ") {
-                let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                if parts.len() == 3 {
-                    let to = parts[1];
-                    let text = parts[2];
-                    let mut w = write_clone.lock().await;
-                    send_encrypted_message(&mut *w, &session, to, text).await;
-                }
-            } else {
-                println!("Usage: /to <token> <message>");
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.starts_with("/to ") {
+            let parts: Vec<&str> = line.splitn(3, ' ').collect();
+            if parts.len() == 3 {
+                let to = parts[1];
+                let text = parts[2];
+                let mut w = write_clone.lock().await;
+                send_encrypted_message(&mut *w, &session, to, text).await;
             }
+        } else {
+            println!("Usage: /to <token> <message>");
         }
     }
 }
@@ -113,7 +112,7 @@ async fn handle_message(
     session: &Arc<Mutex<Session>>,
     write: &Arc<Mutex<futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>>>,
 ) {
-    let ws_msg = match serde_json::from_str::<WsMessage>(text) {
+    let ws_msg: WsMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(_) => return,
     };
@@ -151,15 +150,13 @@ async fn handle_message(
                         pk.insert(token.clone(), pub_key);
                         println!("Received public key from {}", token);
                     }
-                    Err(e) => {
-                        eprintln!("Failed to parse public key from {}: {:?}", token, e);
-                    }
+                    Err(e) => eprintln!("Failed to parse public key from {}: {:?}", token, e),
                 }
             }
         }
         WsMessage::KeyExchange { from, payload, .. } => {
             let s = session.lock().await;
-            let private_key = s.private_key.clone();
+            let private_key = &s.private_key;
             let aes_keys = s.aes_keys.clone();
             drop(s);
 
@@ -171,8 +168,8 @@ async fn handle_message(
                 }
             };
 
-            let decryptor = Decryptor::new(&private_key);
-            let decrypted = match decryptor.decrypt(&encrypted) {
+            let padding = PaddingScheme::new_pkcs1v15_encrypt();
+            let decrypted = match private_key.decrypt(padding, &encrypted) {
                 Ok(d) => d,
                 Err(_) => {
                     eprintln!("Failed to decrypt key exchange from {}", from);
@@ -198,19 +195,10 @@ async fn handle_message(
             drop(s);
 
             let mut keys = aes_keys.lock().await;
-
             if let Some((aes_key, nonce_seed, counter)) = keys.get_mut(&from) {
                 let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
-
                 let mut nonce_bytes = nonce_seed.clone();
-                let counter_bytes = n.to_le_bytes();
-                nonce_bytes.extend_from_slice(&counter_bytes[0..4]);
-
-                if nonce_bytes.len() < 12 {
-                    eprintln!("Invalid nonce length");
-                    return;
-                }
-
+                nonce_bytes.extend_from_slice(&n.to_le_bytes()[0..4]);
                 let nonce = Nonce::from_slice(&nonce_bytes[0..12]);
 
                 let ciphertext = match general_purpose::STANDARD.decode(&data) {
@@ -222,17 +210,14 @@ async fn handle_message(
                 };
 
                 match cipher.decrypt(nonce, ciphertext.as_ref()) {
-                    Ok(plaintext) => {
-                        if let Ok(message) = String::from_utf8(plaintext) {
+                    Ok(plaintext) => match String::from_utf8(plaintext) {
+                        Ok(message) => {
                             println!("{}: {}", from, message);
                             *counter = n + 1;
-                        } else {
-                            eprintln!("Failed to decode UTF-8 from {}", from);
                         }
-                    }
-                    Err(_) => {
-                        eprintln!("Failed to decrypt message from {}", from);
-                    }
+                        Err(_) => eprintln!("Failed to decode UTF-8 from {}", from),
+                    },
+                    Err(_) => eprintln!("Failed to decrypt message from {}", from),
                 }
             } else {
                 eprintln!("No AES key for {}", from);
@@ -266,7 +251,7 @@ async fn send_encrypted_message(
         };
         drop(pk);
 
-        let mut rng = rand::thread_rng();
+        let mut rng = OsRng;
         let mut aes_key = vec![0u8; 32];
         let mut nonce_seed = vec![0u8; 12];
         rng.fill_bytes(&mut aes_key);
@@ -275,8 +260,8 @@ async fn send_encrypted_message(
         let mut payload = aes_key.clone();
         payload.extend_from_slice(&nonce_seed);
 
-        let encryptor = Encryptor::new(&peer_key);
-        let encrypted = match encryptor.encrypt(&mut rng, &payload) {
+        let padding = PaddingScheme::new_pkcs1v15_encrypt();
+        let encrypted = match peer_key.encrypt(&mut rng, padding, &payload) {
             Ok(e) => e,
             Err(_) => {
                 eprintln!("Failed to encrypt key for {}", to);
@@ -285,7 +270,6 @@ async fn send_encrypted_message(
         };
 
         let encoded = general_purpose::STANDARD.encode(&encrypted);
-
         let msg = WsMessage::KeyExchange {
             to: to.to_string(),
             from: my_token.clone(),
@@ -301,33 +285,25 @@ async fn send_encrypted_message(
 
     if let Some((aes_key, nonce_seed, counter)) = keys.get_mut(to) {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&aes_key));
-
         let mut nonce_bytes = nonce_seed.clone();
-        let counter_bytes = counter.to_le_bytes();
-        nonce_bytes.extend_from_slice(&counter_bytes[0..4]);
-
+        nonce_bytes.extend_from_slice(&counter.to_le_bytes()[0..4]);
         let nonce = Nonce::from_slice(&nonce_bytes[0..12]);
 
         match cipher.encrypt(nonce, text.as_bytes()) {
             Ok(ciphertext) => {
                 let encoded = general_purpose::STANDARD.encode(&ciphertext);
-
                 let msg = WsMessage::ChatMessage {
                     to: to.to_string(),
                     from: my_token,
                     n: *counter,
                     data: encoded,
                 };
-
                 *counter += 1;
-
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = write.send(Message::text(json)).await;
                 }
             }
-            Err(_) => {
-                eprintln!("Failed to encrypt message");
-            }
+            Err(_) => eprintln!("Failed to encrypt message"),
         }
     }
 }
