@@ -13,7 +13,8 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use base64::{Engine as _, engine::general_purpose};
 use std::collections::HashMap;
-
+use rsa::pkcs8::DecodePublicKey; // để dùng from_public_key_pem
+use rsa::pkcs1v15::PaddingScheme; // để encrypt/decrypt
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 enum WsMessage {
