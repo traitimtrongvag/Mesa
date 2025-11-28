@@ -45,8 +45,14 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
     // Gửi token cho client
     let _ = tx.send(Message::text(format!("[Token]:{}", token)));
 
+<<<<<<< HEAD
     // Lưu client
     clients.lock().unwrap().insert(token.clone(), tx.clone());
+=======
+    // Lưu client và broadcast info
+    clients.lock().unwrap().insert(token.clone(), tx.clone());
+    broadcast_client_info(&clients); // gửi số người online + token
+>>>>>>> 53ffdb7 (Update)
 
     // Task gửi tin nhắn
     let send_task = tokio::spawn(async move {
@@ -82,11 +88,35 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
         }
     }
 
+<<<<<<< HEAD
     clients.lock().unwrap().remove(&token);
+=======
+    // Client rời đi
+    clients.lock().unwrap().remove(&token);
+    broadcast_client_info(&clients); // cập nhật số người online + token
+>>>>>>> 53ffdb7 (Update)
     println!("Client [{}] disconnected", token);
     let _ = send_task.await;
 }
 
+<<<<<<< HEAD
+=======
+fn broadcast_client_info(clients: &Clients) {
+    let clients_map = clients.lock().unwrap();
+    let count = clients_map.len();
+    let tokens: Vec<String> = clients_map.keys().cloned().collect();
+
+    let msg = Message::text(format!(
+        "{}, Tokens: {:?}",
+        count, tokens
+    ));
+
+    for (_, tx) in clients_map.iter() {
+        let _ = tx.send(msg.clone());
+    }
+}
+
+>>>>>>> 53ffdb7 (Update)
 #[tokio::main]
 async fn main() {
     run_server(8081).await;
