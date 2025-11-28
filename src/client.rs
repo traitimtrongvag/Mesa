@@ -1,3 +1,4 @@
+
 use tokio_tungstenite::connect_async;
 use tokio::io::{self, AsyncBufReadExt};
 use futures::{SinkExt, StreamExt};
@@ -5,16 +6,14 @@ use tungstenite::Message;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
-use rsa::{RsaPrivateKey, RsaPublicKey, PaddingScheme};
-use rsa::pkcs8::{EncodePublicKey, LineEnding};
+use rsa::{RsaPrivateKey, RsaPublicKey, Pkcs1v15Encrypt};
+use rsa::pkcs8::{EncodePublicKey, DecodePublicKey, LineEnding};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use aes_gcm::aead::{Aead, KeyInit};
-use rand::rngs::OsRng;
 use rand::RngCore;
 use base64::{Engine as _, engine::general_purpose};
 use std::collections::HashMap;
-use rsa::pkcs8::DecodePublicKey; // để dùng from_public_key_pem
-use rsa::pkcs1v15::PaddingScheme; // để encrypt/decrypt
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 enum WsMessage {
@@ -54,7 +53,7 @@ async fn main() {
 
     println!("Connected");
 
-    let mut rng = OsRng;
+    let mut rng = rand::thread_rng();
     let bits = 2048;
     let private_key = RsaPrivateKey::new(&mut rng, bits).expect("Failed to generate key");
     let public_key = RsaPublicKey::from(&private_key);
@@ -71,7 +70,6 @@ async fn main() {
     let write_clone = Arc::new(Mutex::new(write));
     let session_clone = session.clone();
 
-    // Reader task
     let write_for_handler = write_clone.clone();
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {
@@ -89,7 +87,6 @@ async fn main() {
         }
     });
 
-    // Stdin loop
     let stdin = io::BufReader::new(io::stdin());
     let mut lines = stdin.lines();
 
@@ -157,7 +154,7 @@ async fn handle_message(
         }
         WsMessage::KeyExchange { from, payload, .. } => {
             let s = session.lock().await;
-            let private_key = &s.private_key;
+            let private_key = s.private_key.clone();
             let aes_keys = s.aes_keys.clone();
             drop(s);
 
@@ -169,8 +166,7 @@ async fn handle_message(
                 }
             };
 
-            let padding = PaddingScheme::new_pkcs1v15_encrypt();
-            let decrypted = match private_key.decrypt(padding, &encrypted) {
+            let decrypted = match private_key.decrypt(Pkcs1v15Encrypt, &encrypted) {
                 Ok(d) => d,
                 Err(_) => {
                     eprintln!("Failed to decrypt key exchange from {}", from);
@@ -252,7 +248,7 @@ async fn send_encrypted_message(
         };
         drop(pk);
 
-        let mut rng = OsRng;
+        let mut rng = rand::thread_rng();
         let mut aes_key = vec![0u8; 32];
         let mut nonce_seed = vec![0u8; 12];
         rng.fill_bytes(&mut aes_key);
@@ -261,8 +257,7 @@ async fn send_encrypted_message(
         let mut payload = aes_key.clone();
         payload.extend_from_slice(&nonce_seed);
 
-        let padding = PaddingScheme::new_pkcs1v15_encrypt();
-        let encrypted = match peer_key.encrypt(&mut rng, padding, &payload) {
+        let encrypted = match peer_key.encrypt(&mut rng, Pkcs1v15Encrypt, &payload) {
             Ok(e) => e,
             Err(_) => {
                 eprintln!("Failed to encrypt key for {}", to);
