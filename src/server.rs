@@ -1,15 +1,38 @@
+
 use warp::Filter;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use futures::{SinkExt, StreamExt};
 use warp::ws::{Message, WebSocket};
 use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
 use rand::{Rng, distributions::Alphanumeric};
+use serde::{Deserialize, Serialize};
 
-type Clients = Arc<Mutex<HashMap<String, UnboundedSender<Message>>>>;
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+enum WsMessage {
+    #[serde(rename = "pubkey")]
+    PublicKey { token: String, key: String },
+    #[serde(rename = "key_exchange")]
+    KeyExchange { to: String, from: String, payload: String },
+    #[serde(rename = "msg")]
+    ChatMessage { to: String, from: String, n: u64, data: String },
+    #[serde(rename = "token")]
+    Token { token: String },
+    #[serde(rename = "clients")]
+    ClientList { clients: Vec<String> },
+}
+
+struct ClientInfo {
+    tx: UnboundedSender<Message>,
+    public_key: Option<String>,
+}
+
+type Clients = Arc<RwLock<HashMap<String, ClientInfo>>>;
 
 pub async fn run_server(port: u16) {
-    let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
+    let clients: Clients = Arc::new(RwLock::new(HashMap::new()));
     let clients_filter = warp::any().map(move || clients.clone());
 
     let ws_route = warp::path("ws")
@@ -21,8 +44,7 @@ pub async fn run_server(port: u16) {
             })
         });
 
-    println!("Simple WebSocket server on port {} (path /ws)", port);
-    
+    println!("Server running on port {}", port);
     warp::serve(ws_route).run(([0, 0, 0, 0], port)).await;
 }
 
@@ -39,72 +61,135 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
     let token = generate_token();
-    println!("Client [{}] connected", token);
+    println!("Client {} connected", token);
 
-    // Gửi token cho client
-    let _ = tx.send(Message::text(format!("[Token]:{}", token)));
+    let token_msg = WsMessage::Token {
+        token: token.clone(),
+    };
 
-    // Lưu client và broadcast info
-    clients.lock().unwrap().insert(token.clone(), tx.clone());
-    broadcast_client_info(&clients); // gửi số người online + token
+    if let Ok(json) = serde_json::to_string(&token_msg) {
+        let _ = tx.send(Message::text(json));
+    }
 
-    // Task gửi tin nhắn
+    clients.write().await.insert(token.clone(), ClientInfo {
+        tx: tx.clone(),
+        public_key: None,
+    });
+
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if ws_tx.send(msg).await.is_err() { break; }
+            if ws_tx.send(msg).await.is_err() {
+                break;
+            }
         }
     });
 
-    // Nhận tin nhắn từ client
     while let Some(result) = ws_rx.next().await {
         match result {
             Ok(msg) => {
                 if msg.is_text() {
-                    let text = msg.to_str().unwrap_or("").to_string();
-                    println!("Message from [{}]: {}", token, text);
-
-                    // Broadcast cho tất cả client khác
-                    let clients_map = clients.lock().unwrap();
-                    for (tok, recipient_tx) in clients_map.iter() {
-                        if *tok != token {
-                            let broadcast_msg = format!("[{}]: {}", token, text);
-                            let _ = recipient_tx.send(Message::text(broadcast_msg));
-                        }
-                    }
-                } else if msg.is_close() { 
-                    break; 
+                    let text = msg.to_str().unwrap_or("");
+                    handle_client_message(text, &token, &clients).await;
+                } else if msg.is_close() {
+                    break;
                 }
             }
-            Err(e) => { 
-                eprintln!("WebSocket error [{}]: {:?}", token, e); 
-                break; 
+            Err(e) => {
+                eprintln!("WebSocket error {}: {:?}", token, e);
+                break;
             }
         }
     }
 
-    // Client rời đi
-    clients.lock().unwrap().remove(&token);
-    broadcast_client_info(&clients); // cập nhật số người online + token
-    println!("Client [{}] disconnected", token);
+    clients.write().await.remove(&token);
+    broadcast_client_list(&clients).await;
+    println!("Client {} disconnected", token);
     let _ = send_task.await;
 }
 
-fn broadcast_client_info(clients: &Clients) {
-    let clients_map = clients.lock().unwrap();
-    let count = clients_map.len();
+async fn handle_client_message(text: &str, sender_token: &str, clients: &Clients) {
+    let ws_msg = match serde_json::from_str::<WsMessage>(text) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    match ws_msg {
+        WsMessage::PublicKey { token, key } => {
+            {
+                let mut clients_map = clients.write().await;
+                if let Some(client) = clients_map.get_mut(sender_token) {
+                    client.public_key = Some(key.clone());
+                }
+            }
+
+            let msg = WsMessage::PublicKey {
+                token: sender_token.to_string(),
+                key: key.clone(),
+            };
+
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let clients_map = clients.read().await;
+                for (tok, client_info) in clients_map.iter() {
+                    if tok != sender_token {
+                        let _ = client_info.tx.send(Message::text(json.clone()));
+                    }
+                }
+            }
+
+            broadcast_client_list(clients).await;
+        }
+        WsMessage::KeyExchange { to, from, payload } => {
+            let clients_map = clients.read().await;
+            if let Some(recipient) = clients_map.get(&to) {
+                let msg = WsMessage::KeyExchange {
+                    to: to.clone(),
+                    from: from.clone(),
+                    payload,
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = recipient.tx.send(Message::text(json));
+                }
+            }
+        }
+        WsMessage::ChatMessage { to, from, n, data } => {
+            let clients_map = clients.read().await;
+            if let Some(recipient) = clients_map.get(&to) {
+                let msg = WsMessage::ChatMessage {
+                    to: to.clone(),
+                    from: from.clone(),
+                    n,
+                    data,
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = recipient.tx.send(Message::text(json));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn broadcast_client_list(clients: &Clients) {
+    let clients_map = clients.read().await;
     let tokens: Vec<String> = clients_map.keys().cloned().collect();
 
-    let msg = Message::text(format!(
-        "Số người online: {}, Tokens: {:?}",
-        count, tokens
-    ));
+    let msg = WsMessage::ClientList {
+        clients: tokens,
+    };
 
-    for (_, tx) in clients_map.iter() {
-        let _ = tx.send(msg.clone());
+    if let Ok(json) = serde_json::to_string(&msg) {
+        for (_, client) in clients_map.iter() {
+            let _ = client.tx.send(Message::text(json.clone()));
+        }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    run_server(8081).await;
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8081".to_string())
+        .parse()
+        .unwrap_or(8081);
+    
+    run_server(port).await;
 }
