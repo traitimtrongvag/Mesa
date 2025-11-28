@@ -5,8 +5,9 @@ use tungstenite::Message;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
-use rsa::{RsaPrivateKey, RsaPublicKey, Ossl};
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use rsa::pkcs8::{EncodePublicKey, DecodePublicKey, LineEnding};
+use rsa::pkcs1v15::{Encryptor, Decryptor};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use aes_gcm::aead::{Aead, KeyInit};
 use rand::RngCore;
@@ -65,7 +66,7 @@ async fn main() {
         aes_keys: Arc::new(Mutex::new(std::collections::HashMap::new())),
     }));
 
-    let (mut write, mut read) = ws_stream.split();
+    let (write, mut read) = ws_stream.split();
 
     let session_clone = session.clone();
     let write_clone = Arc::new(Mutex::new(write));
@@ -158,7 +159,7 @@ async fn handle_message(
         }
         WsMessage::KeyExchange { from, payload, .. } => {
             let s = session.lock().await;
-            let private_key = &s.private_key;
+            let private_key = s.private_key.clone();
             let aes_keys = s.aes_keys.clone();
             drop(s);
 
@@ -170,7 +171,8 @@ async fn handle_message(
                 }
             };
 
-            let decrypted = match private_key.decrypt(Ossl::new(), &encrypted) {
+            let decryptor = Decryptor::new(&private_key);
+            let decrypted = match decryptor.decrypt(&encrypted) {
                 Ok(d) => d,
                 Err(_) => {
                     eprintln!("Failed to decrypt key exchange from {}", from);
@@ -273,7 +275,8 @@ async fn send_encrypted_message(
         let mut payload = aes_key.clone();
         payload.extend_from_slice(&nonce_seed);
 
-        let encrypted = match peer_key.encrypt(&mut rng, Ossl::new(), &payload) {
+        let encryptor = Encryptor::new(&peer_key);
+        let encrypted = match encryptor.encrypt(&mut rng, &payload) {
             Ok(e) => e,
             Err(_) => {
                 eprintln!("Failed to encrypt key for {}", to);

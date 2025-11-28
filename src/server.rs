@@ -114,7 +114,7 @@ async fn handle_client_message(text: &str, sender_token: &str, clients: &Clients
     };
 
     match ws_msg {
-        WsMessage::PublicKey { token, key } => {
+        WsMessage::PublicKey { key, .. } => {
             {
                 let mut clients_map = clients.write().await;
                 if let Some(client) = clients_map.get_mut(sender_token) {
