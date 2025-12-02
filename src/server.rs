@@ -110,7 +110,17 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
 async fn handle_client_message(text: &str, sender_token: &str, clients: &Clients) {
     let ws_msg = match serde_json::from_str::<WsMessage>(text) {
         Ok(m) => m,
-        Err(_) => return,
+        Err(_) => {
+            // If not JSON, treat as broadcast message
+            let clients_map = clients.read().await;
+            let broadcast = format!("[{}]: {}", sender_token, text);
+            for (tok, client_info) in clients_map.iter() {
+                if tok != sender_token {
+                    let _ = client_info.tx.send(Message::text(broadcast.clone()));
+                }
+            }
+            return;
+        }
     };
 
     match ws_msg {
