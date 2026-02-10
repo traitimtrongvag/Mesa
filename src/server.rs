@@ -5,8 +5,8 @@ use tokio::sync::{mpsc::UnboundedSender, RwLock};
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
 
-use crate::protocol::WsMessage;
-use crate::token::generate_token;
+use message::protocol::WsMessage;
+use message::token::generate_token;
 
 struct ClientInfo {
     tx: UnboundedSender<Message>,
