@@ -27,18 +27,6 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
-      - name: Trigger Render deployment
-        if: secrets.RENDER_DEPLOY_HOOK != ''
-        run: |
-          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
-          echo "Deployment hook triggered"
-
-      - name: Wait for deployment
-        if: secrets.RENDER_DEPLOY_HOOK != ''
-        run: |
-          echo "Waiting for deployment to complete..."
-          sleep 60
-
       - name: Health check
         run: |
           echo "Performing health check..."
