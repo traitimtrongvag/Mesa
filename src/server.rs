@@ -1,28 +1,12 @@
-
-use warp::Filter;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use futures::{SinkExt, StreamExt};
-use warp::ws::{Message, WebSocket};
 use std::collections::HashMap;
-use tokio::sync::mpsc::UnboundedSender;
-use rand::{Rng, distributions::Alphanumeric};
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::{mpsc::UnboundedSender, RwLock};
+use warp::ws::{Message, WebSocket};
+use warp::Filter;
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(tag = "type")]
-enum WsMessage {
-    #[serde(rename = "pubkey")]
-    PublicKey { token: String, key: String },
-    #[serde(rename = "key_exchange")]
-    KeyExchange { to: String, from: String, payload: String },
-    #[serde(rename = "msg")]
-    ChatMessage { to: String, from: String, n: u64, data: String },
-    #[serde(rename = "token")]
-    Token { token: String },
-    #[serde(rename = "clients")]
-    ClientList { clients: Vec<String> },
-}
+use crate::protocol::WsMessage;
+use crate::token::generate_token;
 
 struct ClientInfo {
     tx: UnboundedSender<Message>,
@@ -48,14 +32,6 @@ pub async fn run_server(port: u16) {
     warp::serve(ws_route).run(([0, 0, 0, 0], port)).await;
 }
 
-fn generate_token() -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(10)
-        .map(char::from)
-        .collect()
-}
-
 async fn client_connected(ws: WebSocket, clients: Clients) {
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
@@ -63,19 +39,21 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
     let token = generate_token();
     println!("Client {} connected", token);
 
-    let token_msg = WsMessage::Token {
-        token: token.clone(),
-    };
+    let token_msg = WsMessage::new_token(token.clone());
 
-    if let Ok(json) = serde_json::to_string(&token_msg) {
+    if let Ok(json) = token_msg.to_json() {
         let _ = tx.send(Message::text(json));
     }
 
-    clients.write().await.insert(token.clone(), ClientInfo {
-        tx: tx.clone(),
-        public_key: None,
-    });
+    clients.write().await.insert(
+        token.clone(),
+        ClientInfo {
+            tx: tx.clone(),
+            public_key: None,
+        },
+    );
 
+    let token_for_task = token.clone();
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if ws_tx.send(msg).await.is_err() {
@@ -88,8 +66,9 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
         match result {
             Ok(msg) => {
                 if msg.is_text() {
-                    let text = msg.to_str().unwrap_or("");
-                    handle_client_message(text, &token, &clients).await;
+                    if let Ok(text) = msg.to_str() {
+                        handle_client_message(text, &token, &clients).await;
+                    }
                 } else if msg.is_close() {
                     break;
                 }
@@ -103,79 +82,88 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
 
     clients.write().await.remove(&token);
     broadcast_client_list(&clients).await;
-    println!("Client {} disconnected", token);
+    println!("Client {} disconnected", token_for_task);
     let _ = send_task.await;
 }
 
 async fn handle_client_message(text: &str, sender_token: &str, clients: &Clients) {
-    let ws_msg = match serde_json::from_str::<WsMessage>(text) {
+    let ws_msg = match WsMessage::from_json(text) {
         Ok(m) => m,
         Err(_) => {
-            // If not JSON, treat as broadcast message
-            let clients_map = clients.read().await;
-            let broadcast = format!("[{}]: {}", sender_token, text);
-            for (tok, client_info) in clients_map.iter() {
-                if tok != sender_token {
-                    let _ = client_info.tx.send(Message::text(broadcast.clone()));
-                }
-            }
+            broadcast_plain_message(text, sender_token, clients).await;
             return;
         }
     };
 
     match ws_msg {
         WsMessage::PublicKey { key, .. } => {
-            {
-                let mut clients_map = clients.write().await;
-                if let Some(client) = clients_map.get_mut(sender_token) {
-                    client.public_key = Some(key.clone());
-                }
-            }
-
-            let msg = WsMessage::PublicKey {
-                token: sender_token.to_string(),
-                key: key.clone(),
-            };
-
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let clients_map = clients.read().await;
-                for (tok, client_info) in clients_map.iter() {
-                    if tok != sender_token {
-                        let _ = client_info.tx.send(Message::text(json.clone()));
-                    }
-                }
-            }
-
-            broadcast_client_list(clients).await;
+            handle_public_key_message(sender_token, key, clients).await;
         }
         WsMessage::KeyExchange { to, from, payload } => {
-            let clients_map = clients.read().await;
-            if let Some(recipient) = clients_map.get(&to) {
-                let msg = WsMessage::KeyExchange {
-                    to: to.clone(),
-                    from: from.clone(),
-                    payload,
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = recipient.tx.send(Message::text(json));
-                }
-            }
+            relay_key_exchange(to, from, payload, clients).await;
         }
         WsMessage::ChatMessage { to, from, n, data } => {
-            let clients_map = clients.read().await;
-            if let Some(recipient) = clients_map.get(&to) {
-                let msg = WsMessage::ChatMessage {
-                    to: to.clone(),
-                    from: from.clone(),
-                    n,
-                    data,
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = recipient.tx.send(Message::text(json));
-                }
-            }
+            relay_chat_message(to, from, n, data, clients).await;
         }
         _ => {}
+    }
+}
+
+async fn broadcast_plain_message(text: &str, sender_token: &str, clients: &Clients) {
+    let clients_map = clients.read().await;
+    let broadcast = format!("[{}]: {}", sender_token, text);
+    for (tok, client_info) in clients_map.iter() {
+        if tok != sender_token {
+            let _ = client_info.tx.send(Message::text(broadcast.clone()));
+        }
+    }
+}
+
+async fn handle_public_key_message(sender_token: &str, key: String, clients: &Clients) {
+    {
+        let mut clients_map = clients.write().await;
+        if let Some(client) = clients_map.get_mut(sender_token) {
+            client.public_key = Some(key.clone());
+        }
+    }
+
+    let msg = WsMessage::new_public_key(sender_token.to_string(), key);
+
+    if let Ok(json) = msg.to_json() {
+        let clients_map = clients.read().await;
+        for (tok, client_info) in clients_map.iter() {
+            if tok != sender_token {
+                let _ = client_info.tx.send(Message::text(json.clone()));
+            }
+        }
+    }
+
+    broadcast_client_list(clients).await;
+}
+
+async fn relay_key_exchange(to: String, from: String, payload: String, clients: &Clients) {
+    let clients_map = clients.read().await;
+    if let Some(recipient) = clients_map.get(&to) {
+        let msg = WsMessage::new_key_exchange(to, from, payload);
+        if let Ok(json) = msg.to_json() {
+            let _ = recipient.tx.send(Message::text(json));
+        }
+    }
+}
+
+async fn relay_chat_message(
+    to: String,
+    from: String,
+    n: u64,
+    data: String,
+    clients: &Clients,
+) {
+    let clients_map = clients.read().await;
+    if let Some(recipient) = clients_map.get(&to) {
+        let msg = WsMessage::new_chat_message(to, from, n, data);
+        if let Ok(json) = msg.to_json() {
+            let _ = recipient.tx.send(Message::text(json));
+        }
     }
 }
 
@@ -183,12 +171,10 @@ async fn broadcast_client_list(clients: &Clients) {
     let clients_map = clients.read().await;
     let tokens: Vec<String> = clients_map.keys().cloned().collect();
 
-    let msg = WsMessage::ClientList {
-        clients: tokens,
-    };
+    let msg = WsMessage::new_client_list(tokens);
 
-    if let Ok(json) = serde_json::to_string(&msg) {
-        for (_, client) in clients_map.iter() {
+    if let Ok(json) = msg.to_json() {
+        for client in clients_map.values() {
             let _ = client.tx.send(Message::text(json.clone()));
         }
     }
@@ -200,6 +186,6 @@ async fn main() {
         .unwrap_or_else(|_| "8081".to_string())
         .parse()
         .unwrap_or(8081);
-    
+
     run_server(port).await;
 }
