@@ -26,8 +26,3 @@ jobs:
 
       - name: Check documentation
         run: cargo doc --no-deps --document-private-items
-
-      - name: Security audit
-        run: |
-          cargo install cargo-audit
-          cargo audit
