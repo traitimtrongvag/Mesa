@@ -1,6 +1,7 @@
 ![Mesa](.github/assets/cover.png)
 
 [![Build Status](https://github.com/traitimtrongvag/Mesa/actions/workflows/build.yml/badge.svg)](https://github.com/traitimtrongvag/Mesa/actions/workflows/build.yml)
+[![Deploy Status](https://github.com/traitimtrongvag/Mesa/actions/workflows/deploy.yml/badge.svg)](https://github.com/traitimtrongvag/Mesa/actions/workflows/deploy.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 [![Rust Version](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 
@@ -117,7 +118,20 @@ Client A                    Server                    Client B
 
 ### Deployment
 
-Mesa can be easily deployed on cloud platforms. See `.render.yaml` for Render deployment configuration.
+Mesa is deployed and ready to use. The server runs on Render with auto-deployment from the main branch.
+
+**Live Server**
+- WebSocket Endpoint: `wss://messageanonymous.onrender.com/ws`
+- Platform: Render (Free Tier)
+- Auto-deploy: Enabled on push to main branch
+
+**Deployment Process**
+1. Push code to main branch
+2. GitHub Actions runs build verification
+3. Render automatically deploys the new version
+4. Health checks confirm the deployment
+
+See `.render.yaml` for deployment configuration.
 
 ## Project Structure
 
