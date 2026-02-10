@@ -17,6 +17,16 @@ use message::protocol::WsMessage;
 type AesSessionKey = (Vec<u8>, Vec<u8>, u64);
 type PeerPublicKeys = Arc<Mutex<HashMap<String, RsaPublicKey>>>;
 type AesKeys = Arc<Mutex<HashMap<String, AesSessionKey>>>;
+type WsWriter = Arc<
+    Mutex<
+        futures::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+    >,
+>;
 
 struct Session {
     token: String,
@@ -28,8 +38,7 @@ struct Session {
 
 #[tokio::main]
 async fn main() {
-    let url = std::env::var("WS_URL")
-        .unwrap_or_else(|_| "ws://127.0.0.1:8081/ws".to_string());
+    let url = std::env::var("WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:8081/ws".to_string());
 
     println!("Connecting to {}", url);
 
@@ -44,8 +53,7 @@ async fn main() {
     println!("Connected");
 
     let mut rng = rand::thread_rng();
-    let private_key = RsaPrivateKey::new(&mut rng, 2048)
-        .expect("Failed to generate RSA key");
+    let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("Failed to generate RSA key");
     let public_key = RsaPublicKey::from(&private_key);
 
     let session = Arc::new(Mutex::new(Session {
@@ -87,7 +95,7 @@ async fn main() {
                 let to = parts[1];
                 let text = parts[2];
                 let mut w = write_clone.lock().await;
-                send_encrypted_message(&mut *w, &session, to, text).await;
+                send_encrypted_message(&mut w, &session, to, text).await;
             }
         } else {
             println!("Usage: /to <token> <message>");
@@ -95,20 +103,7 @@ async fn main() {
     }
 }
 
-async fn handle_message(
-    text: &str,
-    session: &Arc<Mutex<Session>>,
-    write: &Arc<
-        Mutex<
-            futures::stream::SplitSink<
-                tokio_tungstenite::WebSocketStream<
-                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-                >,
-                Message,
-            >,
-        >,
-    >,
-) {
+async fn handle_message(text: &str, session: &Arc<Mutex<Session>>, write: &WsWriter) {
     let ws_msg: WsMessage = match WsMessage::from_json(text) {
         Ok(m) => m,
         Err(_) => return,
@@ -133,20 +128,7 @@ async fn handle_message(
     }
 }
 
-async fn handle_token_received(
-    token: String,
-    session: &Arc<Mutex<Session>>,
-    write: &Arc<
-        Mutex<
-            futures::stream::SplitSink<
-                tokio_tungstenite::WebSocketStream<
-                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-                >,
-                Message,
-            >,
-        >,
-    >,
-) {
+async fn handle_token_received(token: String, session: &Arc<Mutex<Session>>, write: &WsWriter) {
     let mut s = session.lock().await;
     s.token = token.clone();
     println!("Your token: {}", token);
@@ -288,12 +270,7 @@ async fn send_encrypted_message(
         match cipher.encrypt(nonce, text.as_bytes()) {
             Ok(ciphertext) => {
                 let encoded = general_purpose::STANDARD.encode(&ciphertext);
-                let msg = WsMessage::new_chat_message(
-                    to.to_string(),
-                    my_token,
-                    *counter,
-                    encoded,
-                );
+                let msg = WsMessage::new_chat_message(to.to_string(), my_token, *counter, encoded);
                 *counter += 1;
                 if let Ok(json) = msg.to_json() {
                     let _ = write.send(Message::text(json)).await;

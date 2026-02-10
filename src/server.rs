@@ -19,14 +19,13 @@ pub async fn run_server(port: u16) {
     let clients: Clients = Arc::new(RwLock::new(HashMap::new()));
     let clients_filter = warp::any().map(move || clients.clone());
 
-    let ws_route = warp::path("ws")
-        .and(warp::ws())
-        .and(clients_filter)
-        .map(|ws: warp::ws::Ws, clients: Clients| {
+    let ws_route = warp::path("ws").and(warp::ws()).and(clients_filter).map(
+        |ws: warp::ws::Ws, clients: Clients| {
             ws.on_upgrade(move |socket| async move {
                 client_connected(socket, clients).await;
             })
-        });
+        },
+    );
 
     println!("Server running on port {}", port);
     warp::serve(ws_route).run(([0, 0, 0, 0], port)).await;
@@ -151,13 +150,7 @@ async fn relay_key_exchange(to: String, from: String, payload: String, clients: 
     }
 }
 
-async fn relay_chat_message(
-    to: String,
-    from: String,
-    n: u64,
-    data: String,
-    clients: &Clients,
-) {
+async fn relay_chat_message(to: String, from: String, n: u64, data: String, clients: &Clients) {
     let clients_map = clients.read().await;
     if let Some(recipient) = clients_map.get(&to) {
         let msg = WsMessage::new_chat_message(to, from, n, data);

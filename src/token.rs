@@ -11,7 +11,5 @@ pub fn generate_token() -> String {
 }
 
 pub fn is_valid_token(token: &str) -> bool {
-    !token.is_empty()
-        && token.len() <= 20
-        && token.chars().all(|c| c.is_alphanumeric())
+    !token.is_empty() && token.len() <= 20 && token.chars().all(|c| c.is_alphanumeric())
 }
