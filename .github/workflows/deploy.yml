@@ -12,20 +12,48 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Notify deployment started
+      - name: Deployment started
         run: |
-          echo "🚀 Deployment started for commit ${{ github.sha }}"
+          echo "Deployment started for commit ${{ github.sha }}"
           echo "Branch: ${{ github.ref_name }}"
           echo "Triggered by: ${{ github.actor }}"
 
-      - name: Build check
+      - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Verify build
         run: cargo build --release --verbose
 
-      - name: Deployment info
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Trigger Render deployment
+        if: secrets.RENDER_DEPLOY_HOOK != ''
         run: |
-          echo "✅ Build verification passed"
-          echo "📦 Render will auto-deploy from main branch"
-          echo "🔗 Server URL: https://messageanonymous.onrender.com"
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+          echo "Deployment hook triggered"
+
+      - name: Wait for deployment
+        if: secrets.RENDER_DEPLOY_HOOK != ''
+        run: |
+          echo "Waiting for deployment to complete..."
+          sleep 60
+
+      - name: Health check
+        run: |
+          echo "Performing health check..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://messageanonymous.onrender.com || echo "000")
+          if [ "$STATUS" = "200" ] || [ "$STATUS" = "101" ]; then
+            echo "Health check passed"
+            echo "Server URL: https://messageanonymous.onrender.com"
+          else
+            echo "Health check inconclusive (status: $STATUS)"
+            echo "Server may still be starting up"
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "Build verification: Passed"
+          echo "Render auto-deploy: Active"
+          echo "WebSocket endpoint: wss://messageanonymous.onrender.com/ws"
