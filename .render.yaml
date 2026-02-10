@@ -7,6 +7,7 @@ services:
     branch: main
     buildCommand: cargo build --release
     startCommand: ./target/release/server
+    healthCheckPath: /ws
     envVars:
       - key: PORT
         fromRender: PORT
