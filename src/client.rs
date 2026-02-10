@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::connect_async;
 use tungstenite::Message;
 
-use crate::protocol::WsMessage;
+use message::protocol::WsMessage;
 
 type AesSessionKey = (Vec<u8>, Vec<u8>, u64);
 type PeerPublicKeys = Arc<Mutex<HashMap<String, RsaPublicKey>>>;
