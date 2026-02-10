@@ -1,0 +1,31 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Notify deployment started
+        run: |
+          echo "🚀 Deployment started for commit ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Triggered by: ${{ github.actor }}"
+
+      - name: Build check
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify build
+        run: cargo build --release --verbose
+
+      - name: Deployment info
+        run: |
+          echo "✅ Build verification passed"
+          echo "📦 Render will auto-deploy from main branch"
+          echo "🔗 Server URL: https://messageanonymous.onrender.com"
