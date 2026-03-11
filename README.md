@@ -104,17 +104,7 @@ Mesa uses a JSON-based protocol with the following message types:
 
 ### Encryption Flow
 
-```
-Client A                    Server                    Client B
-   |                          |                          |
-   |-- RSA Public Key ------->|------- Relay ----------->|
-   |                          |                          |
-   |<----- Encrypted AES -----|<----- Encrypted AES -----|
-   |                          |                          |
-   |-- Encrypted Message ---->|------- Relay ----------->|
-   |                          |                          |
-   Server CANNOT decrypt messages (zero-knowledge)
-```
+![Encryption Flow](.github/assets/encryption-flow.png)
 
 ### Deployment
 
