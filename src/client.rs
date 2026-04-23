@@ -89,16 +89,30 @@ async fn main() {
     let mut lines = stdin.lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        if line.starts_with("/to ") {
+        let trimmed = line.trim();
+
+        if trimmed == "exit" || trimmed == "quit" {
+            // Close the WebSocket connection gracefully and stop reading stdin.
+            let mut w = write_clone.lock().await;
+            let _ = w.send(Message::Close(None)).await;
+            break;
+        } else if trimmed == "/list" {
+            // The server pushes ClientList on every connect/disconnect, so the
+            // printed list in the receive handler is always up to date. This
+            // command just reminds the user to watch that output.
+            println!("Online users are printed automatically on connect/disconnect.");
+        } else if line.starts_with("/to ") {
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
             if parts.len() == 3 {
                 let to = parts[1];
                 let text = parts[2];
                 let mut w = write_clone.lock().await;
                 send_encrypted_message(&mut w, &session, to, text).await;
+            } else {
+                println!("Usage: /to <token> <message>");
             }
         } else {
-            println!("Usage: /to <token> <message>");
+            println!("Commands: /to <token> <message> | /list | exit");
         }
     }
 }
@@ -208,9 +222,15 @@ async fn handle_encrypted_message(
     let mut keys = aes_keys.lock().await;
     if let Some((aes_key, nonce_seed, counter)) = keys.get_mut(&from) {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(aes_key));
+        // XOR the 8-byte counter into bytes [4..12] of the nonce seed.
+        // Appending after 12 bytes and then slicing to [0..12] discards the counter,
+        // causing every message to reuse the same nonce and breaking AES-GCM.
         let mut nonce_bytes = nonce_seed.clone();
-        nonce_bytes.extend_from_slice(&n.to_le_bytes()[0..4]);
-        let nonce = Nonce::from_slice(&nonce_bytes[0..12]);
+        let counter_bytes = n.to_le_bytes();
+        for i in 0..8 {
+            nonce_bytes[4 + i] ^= counter_bytes[i];
+        }
+        let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = match general_purpose::STANDARD.decode(&data) {
             Ok(c) => c,
@@ -263,9 +283,13 @@ async fn send_encrypted_message(
 
     if let Some((aes_key, nonce_seed, counter)) = keys.get_mut(to) {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(aes_key));
+        // XOR the counter into bytes [4..12] of the nonce seed (#5).
         let mut nonce_bytes = nonce_seed.clone();
-        nonce_bytes.extend_from_slice(&counter.to_le_bytes()[0..4]);
-        let nonce = Nonce::from_slice(&nonce_bytes[0..12]);
+        let counter_bytes = counter.to_le_bytes();
+        for i in 0..8 {
+            nonce_bytes[4 + i] ^= counter_bytes[i];
+        }
+        let nonce = Nonce::from_slice(&nonce_bytes);
 
         match cipher.encrypt(nonce, text.as_bytes()) {
             Ok(ciphertext) => {

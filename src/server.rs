@@ -6,7 +6,7 @@ use warp::ws::{Message, WebSocket};
 use warp::Filter;
 
 use message::protocol::WsMessage;
-use message::token::generate_token;
+use message::token::{generate_token, is_valid_token};
 
 struct ClientInfo {
     tx: UnboundedSender<Message>,
@@ -35,7 +35,18 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
-    let token = generate_token();
+    let token = {
+        let mut t = generate_token();
+        {
+            // Re-roll on collision. At 10-char alphanumeric the chance is negligible,
+            // but a duplicate would silently evict the existing client.
+            let map = clients.read().await;
+            while map.contains_key(&t) {
+                t = generate_token();
+            }
+        }
+        t
+    };
     println!("Client {} connected", token);
 
     let token_msg = WsMessage::new_token(token.clone());
@@ -82,14 +93,21 @@ async fn client_connected(ws: WebSocket, clients: Clients) {
     clients.write().await.remove(&token);
     broadcast_client_list(&clients).await;
     println!("Client {} disconnected", token_for_task);
+    // Abort before awaiting: once the client is removed from the map its tx
+    // is dropped, but broadcast_client_list above may still hold a transient
+    // read lock. Aborting guarantees the task exits immediately rather than
+    // blocking on a channel that may not yet be fully closed.
+    send_task.abort();
     let _ = send_task.await;
 }
 
 async fn handle_client_message(text: &str, sender_token: &str, clients: &Clients) {
     let ws_msg = match WsMessage::from_json(text) {
         Ok(m) => m,
-        Err(_) => {
-            broadcast_plain_message(text, sender_token, clients).await;
+        Err(e) => {
+            // Malformed payload: log server-side and drop. Never forward raw content
+            // to other peers — doing so would break the zero-knowledge guarantee.
+            eprintln!("Parse error from {}: {:?}", sender_token, e);
             return;
         }
     };
@@ -98,23 +116,24 @@ async fn handle_client_message(text: &str, sender_token: &str, clients: &Clients
         WsMessage::PublicKey { key, .. } => {
             handle_public_key_message(sender_token, key, clients).await;
         }
-        WsMessage::KeyExchange { to, from, payload } => {
-            relay_key_exchange(to, from, payload, clients).await;
+        WsMessage::KeyExchange { to, payload, .. } => {
+            // Ignore client-supplied `from`; use the authenticated sender_token
+            // so a client cannot spoof another user's identity (#6).
+            if !is_valid_token(&to) {
+                eprintln!("Invalid token in KeyExchange.to from {}", sender_token);
+                return;
+            }
+            relay_key_exchange(to, sender_token.to_string(), payload, clients).await;
         }
-        WsMessage::ChatMessage { to, from, n, data } => {
-            relay_chat_message(to, from, n, data, clients).await;
+        WsMessage::ChatMessage { to, n, data, .. } => {
+            // Same: overwrite `from` with the real sender identity (#6).
+            if !is_valid_token(&to) {
+                eprintln!("Invalid token in ChatMessage.to from {}", sender_token);
+                return;
+            }
+            relay_chat_message(to, sender_token.to_string(), n, data, clients).await;
         }
         _ => {}
-    }
-}
-
-async fn broadcast_plain_message(text: &str, sender_token: &str, clients: &Clients) {
-    let clients_map = clients.read().await;
-    let broadcast = format!("[{}]: {}", sender_token, text);
-    for (tok, client_info) in clients_map.iter() {
-        if tok != sender_token {
-            let _ = client_info.tx.send(Message::text(broadcast.clone()));
-        }
     }
 }
 
