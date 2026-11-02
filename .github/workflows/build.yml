@@ -14,3 +14,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --verbose
+
+  windows-build:
+    name: Build Windows executables
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --verbose
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesa-windows-executables
+          path: target/release/*.exe
